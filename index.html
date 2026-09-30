@@ -913,23 +913,25 @@ function bindBackup(){
  const l=$('#bkload');if(l)l.onchange=()=>{const file=l.files&&l.files[0];if(!file)return;const r=new FileReader();r.onload=()=>bkRestore(String(r.result));r.readAsText(file);};
 }
 
-/* ---------- cloud accounts (Supabase email-link sign-in) ---------- */
-const SB_URL='https://nhsugshtnwwcgwysdbie.supabase.co',SB_KEY='sb_publishable_fgVUKaVStEA8SDjLeyygug_b7FHEyUj';
-let sb=null,user=null,cloud='off',pushT=null,acctMsg='';
-try{if(window.supabase&&!framed)sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{flowType:'implicit',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});}catch(e){sb=null;}
+/* ---------- cloud sync (email-only sign-in) ---------- */
+const SB_URL='https://nhsugshtnwwcgwysdbie.supabase.co',SB_KEY='sb_publishable_fgVUKaVStEA8SDjLeyygug_b7FHEyUj',EKEY='homedrill_email';
+let sb=null,user=null,cloud='off',pushT=null,acctMsg='',acE='';
+try{if(window.supabase&&!framed&&window.crypto&&crypto.subtle)sb=window.supabase.createClient(SB_URL,SB_KEY,{auth:{persistSession:false,autoRefreshToken:false,detectSessionInUrl:false}});}catch(e){sb=null;}
 const esc=t=>String(t==null?'':t).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c]);
 const fresh=()=>JSON.parse(JSON.stringify(DEF));
+const normEmail=e=>String(e||'').trim().toLowerCase();
+async function emailKey(e){const b=await crypto.subtle.digest('SHA-256',new TextEncoder().encode('homedrill:v1:'+normEmail(e)));return [...new Uint8Array(b)].map(x=>x.toString(16).padStart(2,'0')).join('');}
 function saveLocal(){try{localStorage.setItem(KEY,JSON.stringify(S));}catch(e){}}
 function cloudQueue(){if(!sb||!user)return;clearTimeout(pushT);cloud='pending';acctBtn();pushT=setTimeout(cloudPush,1500);}
 async function cloudPush(){
  if(!sb||!user)return;clearTimeout(pushT);cloud='sync';acctBtn();
- try{const {error}=await sb.from('user_data').upsert({user_id:user.id,data:S,updated_at:new Date().toISOString()});cloud=error?'err':'ok';}catch(e){cloud='err';}
+ try{const {error}=await sb.rpc('hd_put',{p_k:user.id,p_d:S});cloud=error?'err':'ok';}catch(e){cloud='err';}
  acctBtn();drawAcct();
 }
 async function cloudPull(first){
  if(!sb||!user||run)return;cloud='sync';acctBtn();
  let R=null;
- try{const {data,error}=await sb.from('user_data').select('data').eq('user_id',user.id).maybeSingle();if(error)throw error;R=data&&data.data;}
+ try{const {data,error}=await sb.rpc('hd_get',{p_k:user.id});if(error)throw error;R=data;}
  catch(e){cloud='err';acctBtn();drawAcct();return;}
  if(first){
   if(S.owner&&S.owner!==user.id)S=fresh();
@@ -958,55 +960,37 @@ function drawAcct(){
  ${user?`<p>Signed in as <b>${esc(user.email)}</b></p><p class="muted small" role="status">${esc(cloudTxt())}</p>
   <button class="btn ghost" id="acSync">Sync now</button>
   <button class="btn danger" id="acOut">Sign out</button>
-  <p class="muted small" style="margin:0">Signing out clears this phone, so someone else can sign in. Your records stay safe in your account.</p>`
- :`<p class="muted">Sign in with your email and password. Your log then saves online and follows you to any phone or laptop.</p>
-  <input id="acEmail" type="email" autocomplete="email" inputmode="email" placeholder="Email" aria-label="Email address" value="${esc(acE)}" style="${inp}">
-  <input id="acPw" type="password" autocomplete="current-password" placeholder="Password (at least 6 characters)" aria-label="Password" value="${esc(acP)}" style="${inp}">
+  <p class="muted small" style="margin:0">Signing out clears this phone, so someone else can sign in. Your records stay saved online under your email.</p>`
+ :`<p class="muted">Type your email to open your log. First time? Your account is created automatically. Use the same email on any phone or laptop to get your records.</p>
+  <input id="acEmail" type="email" autocomplete="email" inputmode="email" placeholder="you@example.com" aria-label="Email address" value="${esc(acE)}" style="${inp}">
   <button class="btn" id="acIn">Sign in</button>
-  <button class="btn ghost" id="acNew">New here? Create account</button>
-  ${!S.owner&&(S.sessions.length||S.tests.length)?'<p class="muted small" style="margin:0">The workouts already on this phone will be added to your account when you sign in.</p>':''}`}
+  ${!S.owner&&(S.sessions.length||S.tests.length)?'<p class="muted small" style="margin:0">The workouts already on this phone will be added to your account when you sign in.</p>':''}
+  <p class="muted small" style="margin:0">No password: anyone who types your email can open your log.</p>`}
  ${acctMsg?`<p class="small" role="status" style="margin:0">${esc(acctMsg)}</p>`:''}
  <button class="btn ghost" id="acClose">Close</button></div>`;
  $('#acClose').onclick=closeAcct;
- const i=$('#acIn');if(i)i.onclick=()=>authPw('in');
- const nw=$('#acNew');if(nw)nw.onclick=()=>authPw('up');
- const pw=$('#acPw');if(pw)pw.onkeydown=ev=>{if(ev.key==='Enter')authPw('in');};
+ const i=$('#acIn');if(i)i.onclick=signIn;
+ const e=$('#acEmail');if(e)e.onkeydown=ev=>{if(ev.key==='Enter')signIn();};
  const y=$('#acSync');if(y)y.onclick=()=>cloudPull(false);
  const o=$('#acOut');if(o)o.onclick=signOut;
 }
-let acE='',acP='';
-async function authPw(mode){
- acE=(($('#acEmail')||{}).value||'').trim();acP=(($('#acPw')||{}).value||'');
+async function startUser(email){user={id:await emailKey(email),email:normEmail(email)};try{localStorage.setItem(EKEY,user.email);}catch(e){}acctBtn();await cloudPull(true);}
+async function signIn(){
+ acE=(($('#acEmail')||{}).value||'').trim();
  if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(acE)){acctMsg='Please enter a valid email address.';drawAcct();return;}
- if(acP.length<6){acctMsg='Password needs at least 6 characters.';drawAcct();return;}
- acctMsg=mode==='up'?'Creating your account…':'Signing in…';drawAcct();
- try{
-  if(mode==='up'){
-   const {data,error}=await sb.auth.signUp({email:acE,password:acP});
-   if(error)acctMsg=/registered|exists/i.test(error.message)?'This email already has an account. Tap Sign in instead.':'Could not create the account: '+error.message;
-   else if(!data.session)acctMsg='Account created, but Supabase is still asking for email confirmation. Turn off Confirm email in Supabase, then tap Sign in.';
-   else{acctMsg='Account created. You are signed in.';acP='';}
-  }else{
-   const {error}=await sb.auth.signInWithPassword({email:acE,password:acP});
-   if(error)acctMsg=/invalid/i.test(error.message)?'Wrong email or password. New here? Tap Create account.':/confirm/i.test(error.message)?'This account still needs email confirmation. Turn off Confirm email in Supabase and create the account again.':'Could not sign in: '+error.message;
-   else{acctMsg='Signed in.';acP='';}
-  }
- }catch(err){acctMsg='Could not connect. Check your internet and try again.';}
- drawAcct();
+ acctMsg='Signing in…';drawAcct();
+ try{await startUser(acE);acctMsg=cloud==='err'?'Signed in, but can’t reach the server yet. Your records will sync when you’re online.':'Signed in.';}
+ catch(e){user=null;acctMsg='Could not sign in. Check your internet and try again.';}
+ acctBtn();drawAcct();
 }
 async function signOut(){
  if(user)await cloudPush();
- try{await sb.auth.signOut();}catch(e){}
- user=null;cloud='off';S=fresh();saveLocal();acctMsg='Signed out. Your records are safe in your account.';render();acctBtn();drawAcct();
+ user=null;cloud='off';S=fresh();saveLocal();try{localStorage.removeItem(EKEY);}catch(e){}
+ acctMsg='Signed out. Your records are saved online under your email.';render();acctBtn();drawAcct();
 }
 if(sb){
- sb.auth.onAuthStateChange((ev,session)=>{
-  const u=session&&session.user;
-  if(u&&(!user||user.id!==u.id)){user=u;setTimeout(()=>cloudPull(true),0);}
-  else if(!u&&user){user=null;cloud='off';}
-  else if(u)user=u;
-  acctBtn();drawAcct();
- });
+ let saved='';try{saved=localStorage.getItem(EKEY)||'';}catch(e){}
+ if(saved)setTimeout(()=>startUser(saved).catch(()=>{}),0);
  document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&user)cloudPull(false);});
 }
 document.getElementById('acctBtn').onclick=openAcct;
